@@ -1,0 +1,25 @@
+{
+  "name": "openclaw-plugin-manager",
+  "version": "1.0.0",
+  "description": "Unified MCP management and routing for OpenClaw",
+  "main": "src/index.js",
+  "bin": {
+    "openclaw-plugin-manager": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js --dev",
+    "web": "node src/web/server.js"
+  },
+  "keywords": ["openclaw", "mcp", "router", "plugin"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "yaml": "^2.3.4",
+    "winston": "^3.11.0",
+    "axios": "^1.6.5",
+    "cors": "^2.8.5"
+  }
+}

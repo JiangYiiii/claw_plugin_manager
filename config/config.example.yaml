@@ -1,0 +1,71 @@
+# OpenClaw Plugin Manager 配置示例
+
+server:
+  # MCP 服务模式: stdio | http
+  mode: stdio
+  # HTTP 模式端口（仅 mode=http 时生效）
+  httpPort: 8090
+  # Web 管理界面端口
+  webPort: 8091
+  # 日志级别: error | warn | info | debug
+  logLevel: info
+  # 日志目录
+  logDir: /tmp/openclaw-plugin-manager
+
+# MCP 服务器配置
+mcps:
+  # Chrome DevTools MCP（stdio 进程）
+  chrome-devtools:
+    type: stdio
+    enabled: true
+    priority: 100
+    command: npx
+    args:
+      - chrome-devtools-mcp@latest
+      - --browserUrl=http://127.0.0.1:18800
+    env: {}
+    healthCheck:
+      type: process
+      interval: 30
+    maxRestarts: 3
+    restartDelay: 5
+
+  # TAPD MCP（HTTP 远程服务）
+  tapd:
+    type: http
+    enabled: true
+    priority: 90
+    baseUrl: https://mcp.fintopia.tech/tapd-mcp
+    headers:
+      Authorization: Bearer ${TAPD_TOKEN}
+    timeout: 10000
+    healthCheck:
+      type: http
+      endpoint: /health
+      interval: 60
+
+  # LlamaIndex MCP（stdio 进程）
+  llamaindex:
+    type: stdio
+    enabled: false
+    priority: 80
+    command: /Users/jiangyi/.venvs/llamaindex-mcp/bin/python
+    args:
+      - /Users/jiangyi/Documents/LlamaIndex/LlamaMCP/llamaindex_mcp_server.py
+    env:
+      PYTHONUNBUFFERED: "1"
+    healthCheck:
+      type: process
+      interval: 30
+    maxRestarts: 3
+
+# 路由配置（可选，默认自动路由）
+routing:
+  # 自动发现并构建路由表
+  autoDiscovery: true
+  # 手动路由规则（覆盖自动发现）
+  rules: []
+    # - pattern: "chrome_*"
+    #   target: chrome-devtools
+    # - pattern: "tapd_*"
+    #   target: tapd
