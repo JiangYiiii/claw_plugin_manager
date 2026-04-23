@@ -4,8 +4,14 @@ const MCPAdapter = require('./mcp-adapter');
 class HTTPAdapter extends MCPAdapter {
   constructor(name, config, logger) {
     super(name, config, logger);
+
+    // Parse baseUrl to extract query parameters (like tokens)
+    const url = new URL(config.baseUrl);
+    this.baseUrl = url.origin + url.pathname;
+    this.queryParams = url.search; // Preserves ?token=xxx
+
     this.client = axios.create({
-      baseURL: config.baseUrl,
+      baseURL: this.baseUrl,
       timeout: config.timeout || 10000,
       headers: config.headers || {}
     });
@@ -34,7 +40,10 @@ class HTTPAdapter extends MCPAdapter {
 
   async sendRequest(method, params = {}) {
     try {
-      const response = await this.client.post('/', {
+      // Append query params (like token) to the request URL
+      const url = '/' + this.queryParams;
+
+      const response = await this.client.post(url, {
         jsonrpc: '2.0',
         id: Date.now(),
         method,
@@ -106,7 +115,8 @@ class HTTPAdapter extends MCPAdapter {
   async healthCheck() {
     if (this.config.healthCheck?.endpoint) {
       try {
-        const response = await this.client.get(this.config.healthCheck.endpoint);
+        const url = this.config.healthCheck.endpoint + this.queryParams;
+        const response = await this.client.get(url);
         return response.status === 200;
       } catch (err) {
         return false;

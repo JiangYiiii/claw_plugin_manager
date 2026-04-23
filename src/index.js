@@ -5,6 +5,7 @@ const ConfigLoader = require('./config/config-loader');
 const Logger = require('./core/logger');
 const PluginManager = require('./core/plugin-manager');
 const MCPServer = require('./mcp-server');
+const MCPHTTPServer = require('./mcp-http-server');
 const WebServer = require('./web/server');
 
 async function main() {
@@ -44,13 +45,17 @@ async function main() {
     webServer.start();
 
     // 根据模式启动对应服务
+    let mcpHttpServer = null;
     if (process.env.WEB_ONLY_MODE === 'true') {
       // Web Only 模式（测试用）
       logger.info('Running in Web Only mode (no stdio/http interface)');
       logger.info('Press Ctrl+C to stop');
     } else if (config.server?.mode === 'http') {
-      // HTTP 模式 (未来实现)
-      logger.warn('HTTP mode not implemented yet');
+      // HTTP 模式
+      const httpPort = config.server?.httpPort || 8090;
+      mcpHttpServer = new MCPHTTPServer(pluginManager, logger, httpPort);
+      await mcpHttpServer.start();
+      logger.info('Running in HTTP MCP mode');
     } else {
       // Stdio 模式（默认）
       const mcpServer = new MCPServer(pluginManager, logger);
@@ -62,6 +67,7 @@ async function main() {
       logger.info('Shutting down...');
       await pluginManager.stop();
       webServer.stop();
+      if (mcpHttpServer) mcpHttpServer.stop();
       process.exit(0);
     });
 
@@ -69,6 +75,7 @@ async function main() {
       logger.info('Shutting down...');
       await pluginManager.stop();
       webServer.stop();
+      if (mcpHttpServer) mcpHttpServer.stop();
       process.exit(0);
     });
 
