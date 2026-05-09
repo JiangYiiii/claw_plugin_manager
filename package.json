@@ -11,15 +11,21 @@
     "dev": "node src/index.js --dev",
     "web": "node src/web/server.js"
   },
-  "keywords": ["openclaw", "mcp", "router", "plugin"],
+  "keywords": [
+    "openclaw",
+    "mcp",
+    "router",
+    "plugin"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "ws": "^8.16.0",
-    "yaml": "^2.3.4",
-    "winston": "^3.11.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "axios": "^1.6.5",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "winston": "^3.11.0",
+    "ws": "^8.16.0",
+    "yaml": "^2.3.4"
   }
 }

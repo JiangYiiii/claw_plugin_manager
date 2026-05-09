@@ -63,21 +63,16 @@ async function main() {
     }
 
     // 优雅退出
-    process.on('SIGINT', async () => {
+    const shutdown = async () => {
       logger.info('Shutting down...');
       await pluginManager.stop();
       webServer.stop();
-      if (mcpHttpServer) mcpHttpServer.stop();
+      if (mcpHttpServer) await mcpHttpServer.stop();
       process.exit(0);
-    });
+    };
 
-    process.on('SIGTERM', async () => {
-      logger.info('Shutting down...');
-      await pluginManager.stop();
-      webServer.stop();
-      if (mcpHttpServer) mcpHttpServer.stop();
-      process.exit(0);
-    });
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
 
   } catch (err) {
     logger.error(`Failed to start: ${err.message}`);

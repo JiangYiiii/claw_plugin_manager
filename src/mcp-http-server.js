@@ -1,176 +1,272 @@
 const express = require('express');
+const { randomUUID } = require('node:crypto');
+const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
+const {
+  StreamableHTTPServerTransport,
+} = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
+const {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+} = require('@modelcontextprotocol/sdk/types.js');
+
+const SERVER_INFO = {
+  name: 'openclaw-plugin-manager',
+  version: '2.0.0',
+};
+
+const SERVER_CAPABILITIES = {
+  tools: { listChanged: true },
+  resources: { listChanged: true },
+  prompts: { listChanged: true },
+  logging: {},
+};
+
+const MCP_SESSION_HEADER = 'mcp-session-id';
 
 class MCPHTTPServer {
   constructor(pluginManager, logger, port = 8090) {
     this.pluginManager = pluginManager;
     this.logger = logger;
     this.port = port;
+
     this.app = express();
-    this.server = null;
+    this.httpServer = null;
+
+    // sessionId -> { server, transport }
+    this.sessions = new Map();
 
     this.setupMiddleware();
     this.setupRoutes();
   }
 
   setupMiddleware() {
-    this.app.use(express.json());
+    this.app.use(
+      express.json({
+        limit: '10mb',
+        type: ['application/json', 'application/json-rpc'],
+      })
+    );
 
-    // CORS support
     this.app.use((req, res, next) => {
       res.header('Access-Control-Allow-Origin', '*');
-      res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.header(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-Id, Accept'
+      );
+      res.header('Access-Control-Expose-Headers', 'Mcp-Session-Id');
 
       if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
+        return res.sendStatus(204);
       }
       next();
     });
 
-    // Request logging
     this.app.use((req, res, next) => {
-      this.logger.debug(`HTTP MCP Request: ${req.method} ${req.url}`);
+      if (req.url.startsWith('/mcp')) {
+        const sid = req.headers[MCP_SESSION_HEADER];
+        this.logger.debug(
+          `MCP HTTP ${req.method} ${req.url} session=${sid || 'none'}`
+        );
+      }
       next();
     });
   }
 
   setupRoutes() {
-    // Health check
     this.app.get('/health', (req, res) => {
-      res.json({ status: 'ok', service: 'openclaw-plugin-manager-mcp' });
+      res.json({
+        status: 'ok',
+        service: SERVER_INFO.name,
+        version: SERVER_INFO.version,
+        sessions: this.sessions.size,
+        protocol: 'streamable-http',
+      });
     });
 
-    // MCP JSON-RPC endpoint
-    this.app.post('/', async (req, res) => {
-      try {
-        const request = req.body;
+    this.app.post('/mcp', (req, res) => this.handleMcpRequest(req, res));
+    this.app.get('/mcp', (req, res) => this.handleMcpRequest(req, res));
+    this.app.delete('/mcp', (req, res) => this.handleMcpRequest(req, res));
+  }
 
-        if (!request.jsonrpc || request.jsonrpc !== '2.0') {
-          return res.status(400).json({
-            jsonrpc: '2.0',
-            id: request.id || null,
-            error: {
-              code: -32600,
-              message: 'Invalid Request: jsonrpc version must be 2.0'
-            }
-          });
-        }
+  async handleMcpRequest(req, res) {
+    try {
+      const sessionId = req.headers[MCP_SESSION_HEADER];
+      const isInitializeRequest = this.detectInitializeRequest(req);
 
-        const response = await this.handleRequest(request);
-        res.json(response);
-      } catch (err) {
-        this.logger.error(`HTTP MCP error: ${err.message}`);
+      let entry;
+      if (sessionId && this.sessions.has(sessionId)) {
+        entry = this.sessions.get(sessionId);
+      } else if (!sessionId && isInitializeRequest && req.method === 'POST') {
+        entry = await this.createSession();
+      } else {
+        const code = sessionId ? 404 : 400;
+        const message = sessionId
+          ? `Unknown or expired session: ${sessionId}`
+          : 'Mcp-Session-Id header is required for non-initialize requests';
+        res.status(code).json({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32000, message },
+        });
+        return;
+      }
+
+      await entry.transport.handleRequest(req, res, req.body);
+    } catch (err) {
+      this.logger.error(`MCP HTTP request failed: ${err.stack || err.message}`);
+      if (!res.headersSent) {
         res.status(500).json({
           jsonrpc: '2.0',
-          id: req.body.id || null,
+          id: null,
           error: {
             code: -32603,
-            message: `Internal error: ${err.message}`
-          }
+            message: `Internal error: ${err.message}`,
+          },
         });
+      }
+    }
+  }
+
+  detectInitializeRequest(req) {
+    if (req.method !== 'POST') return false;
+    const body = req.body;
+    if (!body) return false;
+    const messages = Array.isArray(body) ? body : [body];
+    return messages.some(
+      (m) => m && typeof m === 'object' && m.method === 'initialize'
+    );
+  }
+
+  async createSession() {
+    const server = new Server(SERVER_INFO, {
+      capabilities: SERVER_CAPABILITIES,
+    });
+
+    this.registerHandlers(server);
+
+    const entry = { server, transport: null };
+
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sessionId) => {
+        this.logger.info(`MCP session initialized: ${sessionId}`);
+        this.sessions.set(sessionId, entry);
+      },
+    });
+
+    entry.transport = transport;
+
+    transport.onclose = () => {
+      const sid = transport.sessionId;
+      if (sid && this.sessions.has(sid)) {
+        this.logger.info(`MCP session closed: ${sid}`);
+        this.sessions.delete(sid);
+      }
+    };
+
+    transport.onerror = (err) => {
+      this.logger.warn(
+        `MCP transport error (session=${transport.sessionId || 'pending'}): ${err.message}`
+      );
+    };
+
+    await server.connect(transport);
+
+    return entry;
+  }
+
+  registerHandlers(server) {
+    server.oninitialized = () => {
+      const ci = server.getClientVersion();
+      this.logger.info(
+        `MCP client initialized: ${ci?.name || 'unknown'}@${ci?.version || '?'}`
+      );
+    };
+
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const tools = await this.pluginManager.listTools();
+      return { tools };
+    });
+
+    server.setRequestHandler(CallToolRequestSchema, async (req) => {
+      const { name, arguments: args } = req.params;
+      try {
+        const result = await this.pluginManager.callTool(name, args || {});
+        return this.normalizeToolResult(result);
+      } catch (err) {
+        this.logger.warn(`Tool call failed: ${name}: ${err.message}`);
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Error: ${err.message}` }],
+        };
       }
     });
 
-    // Alternative endpoint for compatibility
-    this.app.post('/mcp', async (req, res) => {
-      req.url = '/';
-      this.app._router.handle(req, res);
+    server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      const resources = await this.pluginManager.listResources();
+      return { resources };
+    });
+
+    server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+      return await this.pluginManager.readResource(req.params.uri);
+    });
+
+    server.setRequestHandler(ListPromptsRequestSchema, async () => {
+      const prompts = await this.pluginManager.listPrompts();
+      return { prompts };
+    });
+
+    server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+      return await this.pluginManager.getPrompt(
+        req.params.name,
+        req.params.arguments || {}
+      );
     });
   }
 
-  async handleRequest(request) {
-    const { id, method, params } = request;
+  normalizeToolResult(result) {
+    if (!result || typeof result !== 'object') {
+      return {
+        content: [{ type: 'text', text: String(result ?? '') }],
+      };
+    }
+    if (Array.isArray(result.content)) {
+      return result;
+    }
+    return {
+      content: [
+        { type: 'text', text: JSON.stringify(result, null, 2) },
+      ],
+    };
+  }
 
-    try {
-      let result;
-
-      switch (method) {
-        case 'initialize':
-          result = {
-            protocolVersion: '2024-11-05',
-            capabilities: {
-              tools: {},
-              resources: {},
-              prompts: {}
-            },
-            serverInfo: {
-              name: 'openclaw-plugin-manager',
-              version: '1.0.0'
-            }
-          };
-          this.logger.info('MCP HTTP client initialized');
-          break;
-
-        case 'tools/list':
-          const tools = await this.pluginManager.listTools();
-          result = { tools };
-          this.logger.info(`Listed ${tools.length} tools via HTTP MCP`);
-          break;
-
-        case 'tools/call':
-          if (!params || !params.name) {
-            throw new Error('Missing required parameter: name');
-          }
-          result = await this.pluginManager.callTool(params.name, params.arguments || {});
-          this.logger.info(`Called tool ${params.name} via HTTP MCP`);
-          break;
-
-        case 'resources/list':
-          const resources = await this.pluginManager.listResources();
-          result = { resources };
-          break;
-
-        case 'resources/read':
-          if (!params || !params.uri) {
-            throw new Error('Missing required parameter: uri');
-          }
-          result = await this.pluginManager.readResource(params.uri);
-          break;
-
-        case 'prompts/list':
-          const prompts = await this.pluginManager.listPrompts();
-          result = { prompts };
-          break;
-
-        case 'prompts/get':
-          if (!params || !params.name) {
-            throw new Error('Missing required parameter: name');
-          }
-          result = await this.pluginManager.getPrompt(params.name, params.arguments || {});
-          break;
-
-        default:
-          throw new Error(`Unknown method: ${method}`);
+  async broadcastToolListChanged() {
+    for (const { server } of this.sessions.values()) {
+      try {
+        await server.sendToolListChanged();
+      } catch (err) {
+        this.logger.debug(`Failed to send list_changed: ${err.message}`);
       }
-
-      return {
-        jsonrpc: '2.0',
-        id,
-        result
-      };
-    } catch (err) {
-      this.logger.error(`Error handling ${method}: ${err.message}`);
-      return {
-        jsonrpc: '2.0',
-        id,
-        error: {
-          code: -32603,
-          message: err.message
-        }
-      };
     }
   }
 
   start() {
     return new Promise((resolve, reject) => {
       try {
-        this.server = this.app.listen(this.port, () => {
-          this.logger.info(`MCP HTTP server listening on port ${this.port}`);
-          this.logger.info(`MCP endpoint: http://0.0.0.0:${this.port}/`);
+        this.httpServer = this.app.listen(this.port, () => {
+          this.logger.info(
+            `MCP HTTP server (Streamable HTTP) listening on port ${this.port}`
+          );
+          this.logger.info(`MCP endpoint: http://0.0.0.0:${this.port}/mcp`);
           resolve();
         });
 
-        this.server.on('error', (err) => {
+        this.httpServer.on('error', (err) => {
           this.logger.error(`Failed to start MCP HTTP server: ${err.message}`);
           reject(err);
         });
@@ -180,11 +276,18 @@ class MCPHTTPServer {
     });
   }
 
-  stop() {
-    if (this.server) {
-      this.server.close(() => {
-        this.logger.info('MCP HTTP server stopped');
-      });
+  async stop() {
+    for (const { transport } of this.sessions.values()) {
+      try {
+        await transport.close();
+      } catch {
+      }
+    }
+    this.sessions.clear();
+
+    if (this.httpServer) {
+      await new Promise((resolve) => this.httpServer.close(resolve));
+      this.logger.info('MCP HTTP server stopped');
     }
   }
 }
