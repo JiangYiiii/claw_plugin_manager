@@ -189,7 +189,11 @@ class MCPHTTPServer {
     };
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const tools = await this.pluginManager.listTools();
+      const rawTools = await this.pluginManager.listTools();
+      const tools = rawTools.map((t) => ({
+        ...t,
+        inputSchema: this.sanitizeJsonSchema(t.inputSchema),
+      }));
       return { tools };
     });
 
@@ -227,6 +231,69 @@ class MCPHTTPServer {
         req.params.arguments || {}
       );
     });
+  }
+
+  sanitizeJsonSchema(schema) {
+    if (schema === null || schema === undefined) {
+      return { type: 'object', properties: {} };
+    }
+    if (typeof schema !== 'object') return schema;
+    return this.sanitizeNode(schema);
+  }
+
+  sanitizeNode(node) {
+    if (Array.isArray(node)) {
+      return node.map((item) => this.sanitizeNode(item));
+    }
+    if (!node || typeof node !== 'object') return node;
+
+    const out = { ...node };
+
+    if (out.type === 'array' && out.items === undefined) {
+      out.items = {};
+    }
+
+    if (out.properties && typeof out.properties === 'object') {
+      const cleaned = {};
+      for (const [k, v] of Object.entries(out.properties)) {
+        cleaned[k] = this.sanitizeNode(v);
+      }
+      out.properties = cleaned;
+    }
+
+    if (out.items !== undefined) {
+      out.items = this.sanitizeNode(out.items);
+    }
+
+    if (
+      out.additionalProperties !== undefined &&
+      typeof out.additionalProperties === 'object'
+    ) {
+      out.additionalProperties = this.sanitizeNode(out.additionalProperties);
+    }
+
+    for (const key of ['anyOf', 'oneOf', 'allOf']) {
+      if (Array.isArray(out[key])) {
+        out[key] = out[key].map((s) => this.sanitizeNode(s));
+      }
+    }
+
+    if (out.definitions && typeof out.definitions === 'object') {
+      const cleaned = {};
+      for (const [k, v] of Object.entries(out.definitions)) {
+        cleaned[k] = this.sanitizeNode(v);
+      }
+      out.definitions = cleaned;
+    }
+    if (out.$defs && typeof out.$defs === 'object') {
+      const cleaned = {};
+      for (const [k, v] of Object.entries(out.$defs)) {
+        cleaned[k] = this.sanitizeNode(v);
+      }
+      out.$defs = cleaned;
+    }
+
+    return out;
   }
 
   normalizeToolResult(result) {
