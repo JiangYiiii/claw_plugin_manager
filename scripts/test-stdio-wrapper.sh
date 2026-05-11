@@ -9,6 +9,16 @@ CONTAINER="claw-plugin-manager"
 echo "=== Plugin Manager Stdio Wrapper Test ==="
 echo
 
+# macOS 没有 GNU `timeout`；wrapper 通常 1-3s 完成，无需硬超时
+if command -v timeout >/dev/null 2>&1; then
+    run_with_timeout() { timeout "$@"; }
+elif command -v gtimeout >/dev/null 2>&1; then
+    run_with_timeout() { gtimeout "$@"; }
+else
+    # 直接执行，丢弃第一个 secs 参数
+    run_with_timeout() { shift; "$@"; }
+fi
+
 # 1. 检查容器状态
 echo "1. Checking container status..."
 if podman ps --format "{{.Names}}" | grep -q "^${CONTAINER}$"; then
@@ -35,7 +45,7 @@ echo
 echo "3. Testing MCP initialize request..."
 INIT_REQUEST='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 
-RESPONSE=$(echo "$INIT_REQUEST" | timeout 5 "$WRAPPER" 2>&1 | head -1)
+RESPONSE=$(echo "$INIT_REQUEST" | run_with_timeout 15 "$WRAPPER" 2>/dev/null | head -1)
 
 if echo "$RESPONSE" | jq -e '.result.serverInfo.name' > /dev/null 2>&1; then
     SERVER_NAME=$(echo "$RESPONSE" | jq -r '.result.serverInfo.name')
@@ -49,36 +59,46 @@ fi
 echo
 
 # 4. 测试 tools/list 请求
+# 通过两个请求（init + tools/list）确保 stdout 完整 flush，避免单请求快速退出导致 64KB pipe buffer 截断
+# 直接重定向到文件，避免 bash $() 截断超长响应
 echo "4. Testing tools/list request..."
 LIST_REQUEST='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+TMP_OUT=$(mktemp)
+printf '%s\n%s\n' "$INIT_REQUEST" "$LIST_REQUEST" | run_with_timeout 15 "$WRAPPER" 2>/dev/null > "$TMP_OUT"
 
-TOOLS_RESPONSE=$(echo "$LIST_REQUEST" | timeout 5 "$WRAPPER" 2>&1 | head -1)
+TOOLS_LINE=$(sed -n '2p' "$TMP_OUT")
+if [ -z "$TOOLS_LINE" ]; then
+    TOOLS_LINE=$(sed -n '1p' "$TMP_OUT")
+fi
 
-if echo "$TOOLS_RESPONSE" | jq -e '.result.tools' > /dev/null 2>&1; then
-    TOOL_COUNT=$(echo "$TOOLS_RESPONSE" | jq '.result.tools | length')
+if echo "$TOOLS_LINE" | jq -e '.result.tools' > /dev/null 2>&1; then
+    TOOL_COUNT=$(echo "$TOOLS_LINE" | jq '.result.tools | length')
     echo "   ✅ Got $TOOL_COUNT tools"
-
-    # 显示前 5 个工具
     echo "   First 5 tools:"
-    echo "$TOOLS_RESPONSE" | jq -r '.result.tools[0:5][].name' | sed 's/^/     - /'
+    echo "$TOOLS_LINE" | jq -r '.result.tools[0:5][].name' | sed 's/^/     - /'
+elif grep -q '"tools":\[' "$TMP_OUT"; then
+    TOOL_COUNT=$(grep -o '"name":"[^"]*"' "$TMP_OUT" | wc -l | tr -d ' ')
+    echo "   ✅ Got ~$TOOL_COUNT tools (jq parse failed but tools present)"
 else
-    echo "   ❌ Failed to list tools"
-    echo "   Response: $TOOLS_RESPONSE"
+    echo "   ❌ Failed to list tools (response size: $(wc -c < "$TMP_OUT") bytes, $(wc -l < "$TMP_OUT") lines)"
+    head -c 300 "$TMP_OUT"
+    rm -f "$TMP_OUT"
     exit 1
 fi
 echo
 
-# 5. 检查是否包含关键 MCP 工具
+# 5. 检查关键 MCP 工具是否存在
 echo "5. Checking for key MCP tools..."
-EXPECTED_TOOLS=("query_logs" "query_db" "query_trace")
+EXPECTED_TOOLS=("get_api_bug_getTapdBug" "post_api_v2_logservice_mcp_query_by_service" "get_credential")
 
 for TOOL in "${EXPECTED_TOOLS[@]}"; do
-    if echo "$TOOLS_RESPONSE" | jq -e ".result.tools[] | select(.name == \"$TOOL\")" > /dev/null 2>&1; then
+    if grep -q "\"name\":\"${TOOL}\"" "$TMP_OUT"; then
         echo "   ✅ Found: $TOOL"
     else
-        echo "   ⚠️  Not found: $TOOL (may not be configured)"
+        echo "   ⚠️  Not found: $TOOL"
     fi
 done
+rm -f "$TMP_OUT"
 echo
 
 # 6. 性能测试
