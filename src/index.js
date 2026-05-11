@@ -17,6 +17,11 @@ async function main() {
 
   const devMode = args.includes('--dev') || process.env.NODE_ENV === 'development';
 
+  // stdio 模式下 stdout 必须是干净的 JSON-RPC，所有日志走 stderr
+  if (args.includes('--stdio')) {
+    process.env.PLUGIN_MANAGER_LOG_STREAM = 'stderr';
+  }
+
   // 加载配置
   const configLoader = new ConfigLoader(configPath);
   const config = configLoader.load();
