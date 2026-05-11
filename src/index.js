@@ -39,26 +39,38 @@ async function main() {
   try {
     await pluginManager.start();
 
-    // 启动 Web 服务器
-    const webPort = config.server?.webPort || 8091;
-    const webServer = new WebServer(pluginManager, logger, webPort);
-    webServer.start();
+    // 检查是否强制 stdio 模式（通过 --stdio 参数）
+    const forceStdio = args.includes('--stdio');
 
-    // 根据模式启动对应服务
     let mcpHttpServer = null;
+    let mcpServer = null;
+    let webServer = null;
+
     if (process.env.WEB_ONLY_MODE === 'true') {
-      // Web Only 模式（测试用）
+      const webPort = config.server?.webPort || 19000;
+      webServer = new WebServer(pluginManager, logger, webPort);
+      webServer.start();
       logger.info('Running in Web Only mode (no stdio/http interface)');
       logger.info('Press Ctrl+C to stop');
+    } else if (forceStdio) {
+      // Stdio-only：podman exec 短进程，不抢端口、不打开非必要资源
+      logger.info('Running in stdio-only mode (forced by --stdio flag)');
+      mcpServer = new MCPServer(pluginManager, logger);
+      mcpServer.start();
     } else if (config.server?.mode === 'http') {
-      // HTTP 模式
-      const httpPort = config.server?.httpPort || 8090;
+      // HTTP daemon：暴露 MCP HTTP + Web UI
+      const webPort = config.server?.webPort || 19000;
+      webServer = new WebServer(pluginManager, logger, webPort);
+      webServer.start();
+
+      const httpPort = config.server?.httpPort || 18091;
       mcpHttpServer = new MCPHTTPServer(pluginManager, logger, httpPort);
       await mcpHttpServer.start();
-      logger.info('Running in HTTP MCP mode');
+      logger.info('Running in HTTP MCP mode (daemon)');
+      logger.info('You can also call with --stdio flag for stdio access');
     } else {
-      // Stdio 模式（默认）
-      const mcpServer = new MCPServer(pluginManager, logger);
+      // 默认 stdio 模式（命令行直接启动）
+      mcpServer = new MCPServer(pluginManager, logger);
       mcpServer.start();
     }
 
@@ -66,7 +78,7 @@ async function main() {
     const shutdown = async () => {
       logger.info('Shutting down...');
       await pluginManager.stop();
-      webServer.stop();
+      if (webServer) webServer.stop();
       if (mcpHttpServer) await mcpHttpServer.stop();
       process.exit(0);
     };

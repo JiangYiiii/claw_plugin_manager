@@ -2,11 +2,12 @@
 
 server:
   # MCP 服务模式: stdio | http
-  mode: stdio
-  # HTTP 模式端口（仅 mode=http 时生效）
-  httpPort: 8090
+  # 容器化部署推荐 http（守护 + Web UI），通过 podman exec --stdio 提供 stdio 入口
+  mode: http
+  # HTTP MCP 端口（仅 mode=http 时生效）
+  httpPort: 18091
   # Web 管理界面端口
-  webPort: 8091
+  webPort: 19000
   # 日志级别: error | warn | info | debug
   logLevel: info
   # 日志目录
