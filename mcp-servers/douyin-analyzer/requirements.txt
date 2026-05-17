@@ -1,7 +1,4 @@
 requests
 ffmpeg-python
-openai
-openai-whisper
-faster-whisper
 nest_asyncio
 mcp
