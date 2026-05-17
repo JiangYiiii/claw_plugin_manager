@@ -15,8 +15,6 @@ import time as time_module
 import requests
 import subprocess
 import tempfile
-import nest_asyncio
-nest_asyncio.apply()  # 允许在 async 事件循环中运行 sync 代码
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
