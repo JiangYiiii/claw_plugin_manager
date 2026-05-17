@@ -3,6 +3,5 @@ ffmpeg-python
 openai
 openai-whisper
 faster-whisper
-playwright
 nest_asyncio
 mcp
